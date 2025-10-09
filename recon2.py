@@ -16,7 +16,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Las demás rutas se definen de forma relativa a SCRIPT_DIR
 WORDLIST = os.path.join(SCRIPT_DIR, "wordlists/subdomains.txt")
 RESOLVERS_FILE = os.path.join(SCRIPT_DIR, "resolvers.txt")
-OUTPUT_DIR = os.path.join(SCRIPT_DIR, f"{TARGET}")
+# OUTPUT_DIR = os.path.join(SCRIPT_DIR, f"{TARGET}")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, f"{TARGET}-{datetime.date.today()}")
 
 # Archivos clave
 all_subdomains = os.path.join(OUTPUT_DIR, "subdomains", "all_subdomains.txt")
