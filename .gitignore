@@ -4,4 +4,4 @@ include
 lib
 pyvenv.cfg
 test.py
-
+.DS_Store
