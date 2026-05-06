@@ -33,8 +33,40 @@ def log(level: str, msg: str) -> None:
     print(f"[{ts}] [{level}] {msg}")
 
 
+def _go_bin_dirs() -> List[str]:
+    dirs: List[str] = []
+    gobin = os.environ.get("GOBIN")
+    if gobin:
+        dirs.append(gobin)
+    gopath = os.environ.get("GOPATH")
+    if gopath:
+        dirs.append(os.path.join(gopath, "bin"))
+    dirs.append(os.path.expanduser("~/go/bin"))
+    return dirs
+
+
+def resolve_executable(name: str) -> Optional[str]:
+    """Resolve a CLI tool path. On Ubuntu, Go installs often land in ~/go/bin, which cron/systemd may omit from PATH."""
+    found = shutil.which(name)
+    if found:
+        return found
+    extra = os.environ.get("RECON_TOOL_PATH", "")
+    search_dirs: List[str] = []
+    for part in extra.split(os.pathsep):
+        p = part.strip()
+        if p:
+            search_dirs.append(p)
+    search_dirs.extend(_go_bin_dirs())
+    search_dirs.append("/usr/local/bin")
+    for d in search_dirs:
+        candidate = os.path.join(d, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def tool_exists(name: str) -> bool:
-    return shutil.which(name) is not None
+    return resolve_executable(name) is not None
 
 
 def safe_mkdir(path: str) -> None:
@@ -104,7 +136,7 @@ class CommandRunner:
                     input=stdin_text,
                     text=True,
                     env=env,
-                    stdout=stdout_handle if stdout_handle else subprocess.PIPE,
+                    stdout=stdout_handle if stdout_handle else subprocess.DEVNULL,
                     stderr=stderr_handle,
                     timeout=self.timeout_s,
                     check=True,
@@ -233,7 +265,11 @@ def parse_massdns_stdout(lines: Iterable[str]) -> Tuple[Set[str], Set[str], List
 def run_massdns_resolve(runner: CommandRunner, resolvers_file: str, subdomains: List[str]) -> Tuple[List[str], List[str], List[DNSRecord]]:
     if not subdomains:
         return [], [], []
-    cmd = ["massdns", "-r", resolvers_file, "-t", "A", "-o", "S"]
+    md = resolve_executable("massdns")
+    if not md:
+        log("ERROR", "massdns not found in PATH or RECON_TOOL_PATH / ~/go/bin / /usr/local/bin")
+        return [], [], []
+    cmd = [md, "-r", resolvers_file, "-t", "A", "-o", "S"]
     stdin_text = "\n".join(subdomains) + "\n"
     try:
         p = subprocess.run(
@@ -268,41 +304,51 @@ def run_subdomain_enumeration(
     passive_files: List[str] = []
 
     if enable_passive:
-        if tool_exists("subfinder"):
+        sf = resolve_executable("subfinder")
+        if sf:
             out = os.path.join(out_dir, "passive", "subfinder.txt")
-            runner.run(["subfinder", "-d", target, "-silent"], stdout_path=out, retries=2, allow_fail=True)
+            runner.run([sf, "-d", target, "-silent"], stdout_path=out, retries=2, allow_fail=True)
             passive_files.append(out)
-        if tool_exists("amass"):
+        am = resolve_executable("amass")
+        if am:
             out = os.path.join(out_dir, "passive", "amass.txt")
-            runner.run(["amass", "enum", "-passive", "-d", target, "-silent"], stdout_path=out, retries=1, allow_fail=True)
+            runner.run([am, "enum", "-passive", "-d", target, "-silent"], stdout_path=out, retries=1, allow_fail=True)
             passive_files.append(out)
-        if tool_exists("assetfinder"):
+        af = resolve_executable("assetfinder")
+        if af:
             out = os.path.join(out_dir, "passive", "assetfinder.txt")
-            runner.run(["assetfinder", "--subs-only", target], stdout_path=out, retries=1, allow_fail=True)
+            runner.run([af, "--subs-only", target], stdout_path=out, retries=1, allow_fail=True)
             passive_files.append(out)
+        else:
+            log("WARNING", "assetfinder not found (install or add to PATH / ~/go/bin / RECON_TOOL_PATH); skipping")
 
-    if enable_active and tool_exists("shuffledns"):
-        out = os.path.join(out_dir, "active", "shuffledns_bruteforce.txt")
-        runner.run(
-            [
-                "shuffledns",
-                "-d",
-                target,
-                "-w",
-                wordlist,
-                "-r",
-                resolvers_file,
-                "-mode",
-                "bruteforce",
-                "-t",
-                "500",
-                "-o",
-                out,
-            ],
-            retries=1,
-            allow_fail=True,
-        )
-        passive_files.append(out)
+    if enable_active:
+        sd = resolve_executable("shuffledns")
+        if sd:
+            out = os.path.join(out_dir, "active", "shuffledns_bruteforce.txt")
+            safe_mkdir(os.path.dirname(out))
+            runner.run(
+                [
+                    sd,
+                    "-d",
+                    target,
+                    "-w",
+                    wordlist,
+                    "-r",
+                    resolvers_file,
+                    "-mode",
+                    "bruteforce",
+                    "-t",
+                    "500",
+                    "-o",
+                    out,
+                ],
+                retries=1,
+                allow_fail=True,
+            )
+            passive_files.append(out)
+        else:
+            log("WARNING", "shuffledns not found (install or add to PATH / ~/go/bin / RECON_TOOL_PATH); skipping")
 
     for f in passive_files:
         found.extend(read_text_lines(f))
@@ -374,7 +420,8 @@ def run_http_discovery(
         write_text_lines(out_jsonl, [])
         return out_txt, []
 
-    if not tool_exists("httpx"):
+    httpx_bin = resolve_executable("httpx")
+    if not httpx_bin:
         log("WARNING", "httpx not found; skipping HTTP discovery")
         write_text_lines(out_txt, [])
         write_text_lines(out_jsonl, [])
@@ -383,7 +430,7 @@ def run_http_discovery(
     write_text_lines(domains_file, domains)
     ua = random.choice(USER_AGENTS)
     cmd = [
-        "httpx",
+        httpx_bin,
         "-l",
         domains_file,
         "-silent",
@@ -464,20 +511,21 @@ def run_port_scan(
         write_text_lines(out_jsonl, [])
         return out_txt, []
 
-    if not tool_exists("naabu"):
+    naabu_bin = resolve_executable("naabu")
+    if not naabu_bin:
         log("WARNING", "naabu not found; skipping port scan")
         write_text_lines(out_txt, [])
         write_text_lines(out_jsonl, [])
         return out_txt, []
 
     write_text_lines(ips_file, ips)
-    cmd = ["naabu", "-silent", "-json", "-rate", str(rate_limit), "-list", ips_file]
+    cmd = [naabu_bin, "-silent", "-json", "-rate", str(rate_limit), "-list", ips_file]
     if proxy:
         cmd.extend(["-proxy", proxy])
     runner.run(cmd, stdout_path=out_jsonl, retries=1, allow_fail=True)
     results = parse_naabu_jsonl(out_jsonl)
     if not results:
-        runner.run(["naabu", "-silent", "-list", ips_file], stdout_path=out_txt, retries=1, allow_fail=True)
+        runner.run([naabu_bin, "-silent", "-list", ips_file], stdout_path=out_txt, retries=1, allow_fail=True)
         results = parse_naabu_text(out_txt)
     write_text_lines(out_txt, dedupe_sorted([f"{ip}:{port}" for ip, port, _ in results]))
     return out_txt, results
@@ -547,7 +595,8 @@ def run_nmap_service_detection(
     out_txt = os.path.join(out_dir, "scans", "nmap_versions.txt")
     out_xml = os.path.join(out_dir, "scans", "nmap_versions.xml")
 
-    if not ips or not discovered_ports or not tool_exists("nmap"):
+    nmap_bin = resolve_executable("nmap")
+    if not ips or not discovered_ports or not nmap_bin:
         write_text_lines(out_txt, [])
         write_text_lines(out_xml, [])
         return (out_txt, out_xml), []
@@ -563,7 +612,7 @@ def run_nmap_service_detection(
     write_text_lines(ips_file, ips)
     runner.run(
         [
-            "nmap",
+            nmap_bin,
             "-sV",
             "-sC",
             "-p",
@@ -586,16 +635,18 @@ def run_nmap_service_detection(
 
 def run_wayback(runner: CommandRunner, target: str, out_dir: str) -> str:
     out = os.path.join(out_dir, "discovery", "waybackurls.txt")
-    if not tool_exists("waybackurls"):
+    wb = resolve_executable("waybackurls")
+    if not wb:
         write_text_lines(out, [])
         return out
-    runner.run(["waybackurls", target], stdout_path=out, retries=2, allow_fail=True)
+    runner.run([wb, target], stdout_path=out, retries=2, allow_fail=True)
     return out
 
 
 def run_katana(runner: CommandRunner, active_urls_path: str, out_dir: str, *, waf_delay_s: float = 0.0) -> str:
     out = os.path.join(out_dir, "discovery", "katana.txt")
-    if not tool_exists("katana"):
+    kat = resolve_executable("katana")
+    if not kat:
         write_text_lines(out, [])
         return out
     urls = read_text_lines(active_urls_path)
@@ -603,7 +654,7 @@ def run_katana(runner: CommandRunner, active_urls_path: str, out_dir: str, *, wa
         write_text_lines(out, [])
         return out
     runner.run(
-        ["katana", "-silent", "-jc", "-d", "5", "-H", f"User-Agent: {random.choice(USER_AGENTS)}"],
+        [kat, "-silent", "-jc", "-d", "5", "-H", f"User-Agent: {random.choice(USER_AGENTS)}"],
         stdout_path=out,
         stdin_text="\n".join(urls) + "\n",
         delay_s=waf_delay_s,
@@ -622,7 +673,8 @@ def merge_endpoints(out_dir: str, katana_path: str, wayback_path: str) -> str:
 
 def run_gf_filters(runner: CommandRunner, endpoints_path: str, out_dir: str, patterns: Sequence[str], *, waf_delay_s: float = 0.0) -> Dict[str, str]:
     out_map: Dict[str, str] = {}
-    if not tool_exists("gf"):
+    gf = resolve_executable("gf")
+    if not gf:
         for p in patterns:
             out_map[p] = os.path.join(out_dir, "vulns", f"gf_{p}.txt")
             write_text_lines(out_map[p], [])
@@ -630,7 +682,7 @@ def run_gf_filters(runner: CommandRunner, endpoints_path: str, out_dir: str, pat
     endpoints = read_text_lines(endpoints_path)
     for pattern in patterns:
         out = os.path.join(out_dir, "vulns", f"gf_{pattern}.txt")
-        runner.run(["gf", pattern], stdout_path=out, stdin_text="\n".join(endpoints) + "\n", delay_s=waf_delay_s, allow_fail=True)
+        runner.run([gf, pattern], stdout_path=out, stdin_text="\n".join(endpoints) + "\n", delay_s=waf_delay_s, allow_fail=True)
         out_map[pattern] = out
     return out_map
 
@@ -685,7 +737,8 @@ def run_nuclei(
     out_paths: Dict[str, str] = {}
     all_findings: List[Finding] = []
 
-    if not tool_exists("nuclei"):
+    nuclei_bin = resolve_executable("nuclei")
+    if not nuclei_bin:
         for k in categories:
             out_paths[k] = os.path.join(out_dir, "scans", f"nuclei_{k}.jsonl")
             write_text_lines(out_paths[k], [])
@@ -698,7 +751,7 @@ def run_nuclei(
             write_text_lines(out_paths[k], [])
         return out_paths, []
 
-    base = ["nuclei", "-jsonl", "-silent", "-c", "20", "-rate-limit", str(rate_limit), "-timeout", "10"]
+    base = [nuclei_bin, "-jsonl", "-silent", "-c", "20", "-rate-limit", str(rate_limit), "-timeout", "10"]
     if proxy:
         base.extend(["-proxy", proxy])
 
@@ -713,11 +766,12 @@ def run_nuclei(
 
 def run_takeover_check(runner: CommandRunner, subdomains: List[str], out_dir: str, *, waf_delay_s: float = 0.0) -> Tuple[str, List[Finding]]:
     out = os.path.join(out_dir, "vulns", "subdomain_takeover.jsonl")
-    if not tool_exists("nuclei") or not subdomains:
+    nuclei_bin = resolve_executable("nuclei")
+    if not nuclei_bin or not subdomains:
         write_text_lines(out, [])
         return out, []
     runner.run(
-        ["nuclei", "-silent", "-jsonl", "-t", "vulnerabilities/network/subdomain-takeover/"],
+        [nuclei_bin, "-silent", "-jsonl", "-t", "vulnerabilities/network/subdomain-takeover/"],
         stdout_path=out,
         stdin_text="\n".join(subdomains) + "\n",
         delay_s=waf_delay_s,
@@ -731,7 +785,8 @@ def run_takeover_check(runner: CommandRunner, subdomains: List[str], out_dir: st
 
 def detect_waf_httpx(runner: CommandRunner, active_urls_path: str, out_dir: str, *, proxy: Optional[str] = None) -> Tuple[str, List[Finding]]:
     out_jsonl = os.path.join(out_dir, "waf", "httpx_waf.jsonl")
-    if not tool_exists("httpx"):
+    httpx_bin = resolve_executable("httpx")
+    if not httpx_bin:
         write_text_lines(out_jsonl, [])
         return out_jsonl, []
     urls = read_text_lines(active_urls_path)
@@ -739,7 +794,7 @@ def detect_waf_httpx(runner: CommandRunner, active_urls_path: str, out_dir: str,
         write_text_lines(out_jsonl, [])
         return out_jsonl, []
 
-    cmd = ["httpx", "-silent", "-json", "-tls-probe", "-cname-probe", "-H", f"User-Agent: {random.choice(USER_AGENTS)}"]
+    cmd = [httpx_bin, "-silent", "-json", "-tls-probe", "-cname-probe", "-H", f"User-Agent: {random.choice(USER_AGENTS)}"]
     if proxy:
         cmd.extend(["-proxy", proxy])
     runner.run(cmd, stdout_path=out_jsonl, stdin_text="\n".join(urls) + "\n", allow_fail=True)
@@ -839,7 +894,7 @@ def main() -> int:
     )
 
     required_tools = ["massdns", "httpx", "naabu", "nmap"]
-    optional_tools = ["subfinder", "amass", "assetfinder", "katana", "waybackurls", "gf", "nuclei"]
+    optional_tools = ["subfinder", "amass", "assetfinder", "shuffledns", "katana", "waybackurls", "gf", "nuclei"]
     meta.tools = {t: tool_exists(t) for t in required_tools + optional_tools}
 
     runner = CommandRunner(timeout_s=1200, quiet_stderr=True)
