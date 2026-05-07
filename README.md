@@ -141,6 +141,7 @@ Nota: en Linux requiere entorno Kerberos/ODBC integrado correctamente configurad
 
 ### SuperReconn
 
+- `RECON_TOOL_PATH` (optional; paths to search for CLI tools like `massdns` and `shuffledns`)
 - `RECON_RATE_LIMIT` (default `100`)
 - `RECON_WAF_DELAY` (default `1`)
 - `RECON_PROXY` (default vacio)
