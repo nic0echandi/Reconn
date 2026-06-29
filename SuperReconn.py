@@ -751,7 +751,7 @@ def run_nuclei(
             write_text_lines(out_paths[k], [])
         return out_paths, []
 
-    base = [nuclei_bin, "-jsonl", "-silent", "-c", "20", "-rate-limit", str(rate_limit), "-timeout", "10"]
+    base = [nuclei_bin, "-jsonl", "-silent", "-c", "20", "-rate-limit", str(rate_limit), "-timeout", "30", "-l", "-"]
     if proxy:
         base.extend(["-proxy", proxy])
 
@@ -771,7 +771,7 @@ def run_takeover_check(runner: CommandRunner, subdomains: List[str], out_dir: st
         write_text_lines(out, [])
         return out, []
     runner.run(
-        [nuclei_bin, "-silent", "-jsonl", "-t", "vulnerabilities/network/subdomain-takeover/"],
+        [nuclei_bin, "-silent", "-jsonl", "-l", "-", "-t", "vulnerabilities/network/subdomain-takeover/"],
         stdout_path=out,
         stdin_text="\n".join(subdomains) + "\n",
         delay_s=waf_delay_s,
