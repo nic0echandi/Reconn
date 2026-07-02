@@ -1,1 +1,32 @@
-pyodbc
+# SuperReconn - Python Dependencies
+# ====================================
+# Este archivo contiene todas las dependencias de Python para SuperReconn.
+#
+# INSTALACIÓN:
+#   pip install -r requirements.txt
+#
+# NOTAS:
+#   - pyodbc es requerido solo si usas persistencia en SQL Server
+#   - Las herramientas de reconocimiento (massdns, httpx, etc.) se instalan
+#     por separado en el sistema operativo (ver README.md)
+
+# === CORE REQUERIDO ===
+# Necesario para conectar con SQL Server (opcional pero recomendado)
+pyodbc>=5.0.0,<6.0.0
+
+# === DEVELOPMENT (opcional) ===
+# Descomenta si quieres ejecutar tests y linting
+
+# Testing
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
+
+# Code quality
+# black>=23.0.0
+# flake8>=6.0.0
+# mypy>=1.0.0
+# pylint>=3.0.0
+
+# Documentation
+# sphinx>=6.0.0
+# sphinx-rtd-theme>=1.0.0

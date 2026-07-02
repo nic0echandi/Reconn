@@ -1,9 +1,35 @@
 #!/usr/bin/env python3
 
+"""
+SuperReconn - Reconnaissance pipeline para mapeo de superficie expuesta.
+
+Combina enumeración pasiva/activa de subdominios, descubrimiento de servicios HTTP,
+escaneo de puertos, detección de servicios/versiones y análisis de vulnerabilidades
+con salida JSON estructurada y persistencia opcional en SQL Server.
+
+Herramientas soportadas:
+    Requeridas: massdns, httpx, naabu, nmap
+    Opcionales: subfinder, amass, assetfinder, shuffledns, katana, waybackurls, gf, nuclei
+
+Uso:
+    python3 SuperReconn.py example.com
+    python3 SuperReconn.py example.com -o ./resultados --rate-limit 200 --waf-delay 2
+    python3 SuperReconn.py example.com --no-nuclei --no-crawl  # Modo rápido
+
+Variables de entorno:
+    RECON_TOOL_PATH: Rutas adicionales donde buscar herramientas (separadas por :)
+    RECON_RATE_LIMIT: Límite de tasa (default: 100)
+    RECON_WAF_DELAY: Delay entre peticiones para eludir WAF (default: 1)
+    RECON_PROXY: Proxy HTTP/HTTPS (ej: http://127.0.0.1:8080)
+
+Nota: La persistencia en SQL Server es OPCIONAL. Usa persist_mssql.py después de ejecutar.
+"""
+
 import argparse
 import datetime as dt
 import ipaddress
 import json
+import logging
 import os
 import random
 import shutil
@@ -23,17 +49,85 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
 ]
 
+_logger: Optional[logging.Logger] = None
+
+
+def setup_logging(output_dir: str) -> logging.Logger:
+    """
+    Configura logging a archivo y consola.
+    
+    Args:
+        output_dir: Directorio donde guardar el archivo execution.log
+        
+    Returns:
+        Logger configurado
+    """
+    global _logger
+    
+    log_file = os.path.join(output_dir, "execution.log")
+    
+    # Crear logger
+    logger = logging.getLogger("SuperReconn")
+    logger.setLevel(logging.DEBUG)
+    
+    # Handler para archivo (DEBUG)
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        fmt="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler.setFormatter(file_formatter)
+    
+    # Handler para consola (INFO)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter(
+        fmt="[%(asctime)s] [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S"
+    )
+    console_handler.setFormatter(console_formatter)
+    
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    _logger = logger
+    return logger
+
 
 def now_utc_iso() -> str:
+    """Retorna timestamp UTC en formato ISO 8601."""
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
 def log(level: str, msg: str) -> None:
-    ts = dt.datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] [{level}] {msg}")
+    """
+    Log mensaje a consola y archivo.
+    
+    Args:
+        level: Nivel de log (INFO, WARNING, ERROR, DEBUG)
+        msg: Mensaje a loguear
+    """
+    if _logger is None:
+        # Fallback si logging no está configurado
+        ts = dt.datetime.now().strftime("%H:%M:%S")
+        print(f"[{ts}] [{level}] {msg}")
+        return
+    
+    log_level = getattr(logging, level.upper(), logging.INFO)
+    _logger.log(log_level, msg)
 
 
 def _go_bin_dirs() -> List[str]:
+    """
+    Retorna lista de directorios donde buscar binarios Go.
+    
+    En Ubuntu, las herramientas instaladas con Go frecuentemente se encuentran
+    en ~/go/bin, que puede no estar en PATH cuando se ejecuta desde cron/systemd.
+    
+    Returns:
+        Lista de directorios candidatos
+    """
     dirs: List[str] = []
     gobin = os.environ.get("GOBIN")
     if gobin:
@@ -46,7 +140,17 @@ def _go_bin_dirs() -> List[str]:
 
 
 def resolve_executable(name: str) -> Optional[str]:
-    """Resolve a CLI tool path. On Ubuntu, Go installs often land in ~/go/bin, which cron/systemd may omit from PATH."""
+    """
+    Resuelve la ruta de una herramienta CLI.
+    
+    Busca en: PATH -> RECON_TOOL_PATH -> Go dirs -> /usr/local/bin
+    
+    Args:
+        name: Nombre del ejecutable
+        
+    Returns:
+        Ruta absoluta del ejecutable o None si no se encuentra
+    """
     found = shutil.which(name)
     if found:
         return found
@@ -66,14 +170,44 @@ def resolve_executable(name: str) -> Optional[str]:
 
 
 def tool_exists(name: str) -> bool:
+    """Verifica si una herramienta está disponible."""
     return resolve_executable(name) is not None
 
 
+def validate_environment() -> None:
+    """
+    Valida que el entorno esté configurado correctamente.
+    
+    Verifica:
+    - Herramientas requeridas disponibles
+    - Archivos de configuración necesarios
+    
+    Raises:
+        SystemExit: Si hay errores críticos
+    """
+    required_tools = ["massdns", "httpx", "naabu", "nmap"]
+    missing = [t for t in required_tools if not tool_exists(t)]
+    
+    if missing:
+        log("ERROR", f"Herramientas requeridas no encontradas: {', '.join(missing)}")
+        log("ERROR", "Asegúrate de que estén en PATH o en RECON_TOOL_PATH")
+        sys.exit(1)
+    
+    log("INFO", f"Herramientas validadas: {', '.join(required_tools)}")
+
+
+
 def safe_mkdir(path: str) -> None:
+    """Crea directorio recursivamente si no existe."""
     os.makedirs(path, exist_ok=True)
 
 
 def write_text_lines(path: str, lines: Iterable[str]) -> None:
+    """
+    Escribe líneas de texto a archivo.
+    
+    Stripea espacios en blanco y salta líneas vacías.
+    """
     safe_mkdir(os.path.dirname(path))
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         for line in lines:
@@ -83,12 +217,14 @@ def write_text_lines(path: str, lines: Iterable[str]) -> None:
 
 
 def write_json(path: str, obj: Any) -> None:
+    """Escribe objeto Python a JSON con indentación."""
     safe_mkdir(os.path.dirname(path))
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
 def read_text_lines(path: str) -> List[str]:
+    """Lee líneas de texto desde archivo, stripea espacios en blanco."""
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         return []
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -96,11 +232,27 @@ def read_text_lines(path: str) -> List[str]:
 
 
 def dedupe_sorted(items: Iterable[str]) -> List[str]:
+    """Deduplica y ordena lista de strings."""
     return sorted({i.strip() for i in items if i and i.strip()})
 
 
 class CommandRunner:
+    """
+    Ejecutor de comandos externo con reintentos, timeout y manejo de errores.
+    
+    Attributes:
+        timeout_s: Timeout en segundos para cada comando
+        quiet_stderr: Si es True, suprime stderr
+    """
+    
     def __init__(self, timeout_s: int = 900, quiet_stderr: bool = True):
+        """
+        Inicializa CommandRunner.
+        
+        Args:
+            timeout_s: Timeout por defecto (default: 900s = 15min)
+            quiet_stderr: Si True, redirige stderr a /dev/null (default: True)
+        """
         self.timeout_s = timeout_s
         self.quiet_stderr = quiet_stderr
 
@@ -116,6 +268,22 @@ class CommandRunner:
         delay_s: float = 0.0,
         allow_fail: bool = False,
     ) -> bool:
+        """
+        Ejecuta comando con reintentos y timeout.
+        
+        Args:
+            cmd: Comando a ejecutar (lista de strings)
+            stdout_path: Archivo donde guardar stdout (opcional)
+            stdin_text: Texto a pasar a stdin (opcional)
+            env_extra: Variables de entorno adicionales
+            retries: Número de reintentos (default: 1)
+            retry_backoff_s: Factor de backoff exponencial entre reintentos
+            delay_s: Delay antes de ejecutar
+            allow_fail: Si True, no falla si el comando retorna error
+            
+        Returns:
+            True si el comando fue exitoso, False en caso contrario
+        """
         if delay_s > 0:
             time.sleep(delay_s)
 
@@ -125,7 +293,7 @@ class CommandRunner:
 
         for attempt in range(retries):
             try:
-                log("INFO", f"Running: {' '.join(cmd)}")
+                log("DEBUG", f"Running: {' '.join(cmd)}")
                 stdout_handle = None
                 stderr_handle = subprocess.DEVNULL if self.quiet_stderr else None
                 if stdout_path:
@@ -159,6 +327,7 @@ class CommandRunner:
 
 @dataclass
 class ScanMeta:
+    """Metadata sobre la ejecución del scan."""
     scan_id: str
     target: str
     started_at_utc: str
@@ -172,6 +341,7 @@ class ScanMeta:
 
 @dataclass
 class DNSRecord:
+    """Registro DNS resuelto."""
     name: str
     rtype: str
     value: str
@@ -180,6 +350,7 @@ class DNSRecord:
 
 @dataclass
 class HttpService:
+    """Servicio HTTP descubierto."""
     url: str
     host: str
     port: Optional[int] = None
@@ -195,6 +366,7 @@ class HttpService:
 
 @dataclass
 class NetworkService:
+    """Servicio de red descubierto por nmap."""
     ip: str
     port: int
     protocol: str
@@ -208,6 +380,7 @@ class NetworkService:
 
 @dataclass
 class Finding:
+    """Hallazgo de seguridad (vulnerabilidad, misconfiguration, etc)."""
     category: str  # nuclei/gf/waf/takeover/other
     source: str  # tool name or template id
     severity: Optional[str] = None
@@ -217,6 +390,7 @@ class Finding:
 
 
 def normalize_domain(s: str) -> str:
+    """Normaliza dominio: strip, lowercase, sin punto final."""
     s = (s or "").strip()
     if not s:
         return s
@@ -225,6 +399,7 @@ def normalize_domain(s: str) -> str:
 
 
 def normalize_ip(s: str) -> Optional[str]:
+    """Valida y normaliza dirección IP."""
     s = (s or "").strip()
     if not s:
         return None
@@ -235,6 +410,12 @@ def normalize_ip(s: str) -> Optional[str]:
 
 
 def parse_massdns_stdout(lines: Iterable[str]) -> Tuple[Set[str], Set[str], List[DNSRecord]]:
+    """
+    Parsea salida de massdns (formato: nombre tipo valor).
+    
+    Returns:
+        (dominios, IPs, registros DNS)
+    """
     domains: Set[str] = set()
     ips: Set[str] = set()
     records: List[DNSRecord] = []
@@ -834,7 +1015,32 @@ def build_structured_output(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="SuperReconn - active/passive recon + inventory + security + MSSQL-ready JSON artifacts")
+    """
+    Función principal de SuperReconn.
+    
+    Returns:
+        Código de salida (0 = éxito, != 0 = error)
+    """
+    parser = argparse.ArgumentParser(
+        description="SuperReconn - active/passive recon + inventory + security + MSSQL-ready JSON artifacts",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Ejemplos de uso:
+  python3 SuperReconn.py example.com
+  python3 SuperReconn.py example.com -o ./resultados/example.com
+  python3 SuperReconn.py example.com --rate-limit 200 --waf-delay 2
+  python3 SuperReconn.py example.com --no-nuclei --no-crawl (modo rápido)
+
+Variables de entorno:
+  RECON_TOOL_PATH      Rutas adicionales para buscar herramientas (separadas por :)
+  RECON_RATE_LIMIT     Límite de tasa por defecto (default: 100)
+  RECON_WAF_DELAY      Delay entre peticiones (default: 1s)
+  RECON_PROXY          Proxy HTTP/HTTPS (ej: http://127.0.0.1:8080)
+
+Para persistencia en SQL Server:
+  Ejecuta después: python3 persist_mssql.py ./resultados/example.com-2026-07-02/structured/superreconn.json
+        """
+    )
     parser.add_argument("target", help="Target domain (e.g. example.com)")
     parser.add_argument("-o", "--output", help="Output directory (default: <target>-<date>)")
     parser.add_argument("--wordlist", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "wordlists", "subdomains.txt"))
@@ -854,16 +1060,23 @@ def main() -> int:
 
     target = normalize_domain(args.target)
     if not target or "." not in target:
-        log("ERROR", "Target must be a domain like example.com")
+        print("ERROR: Target must be a domain like example.com")
         return 2
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     output_dir = args.output or os.path.join(script_dir, f"{target}-{dt.date.today().isoformat()}")
     safe_mkdir(output_dir)
+    
+    # Configurar logging ANTES de hacer logs
+    setup_logging(output_dir)
 
     # base dirs
     for d in ["subdomains", "passive", "active", "discovery", "scans", "vulns", "waf", "structured"]:
         safe_mkdir(os.path.join(output_dir, d))
+
+    log("INFO", "="*70)
+    log("INFO", "SuperReconn - Active/Passive Reconnaissance Pipeline")
+    log("INFO", "="*70)
 
     if not os.path.exists(args.resolvers) or os.path.getsize(args.resolvers) == 0:
         log("ERROR", f"Resolvers file missing/empty: {args.resolvers}")
@@ -871,6 +1084,9 @@ def main() -> int:
     if not os.path.exists(args.wordlist) or os.path.getsize(args.wordlist) == 0:
         log("ERROR", f"Wordlist missing/empty: {args.wordlist}")
         return 2
+
+    # Validar herramientas requeridas
+    validate_environment()
 
     proxy = args.proxy.strip() or None
 
@@ -896,16 +1112,17 @@ def main() -> int:
     required_tools = ["massdns", "httpx", "naabu", "nmap"]
     optional_tools = ["subfinder", "amass", "assetfinder", "shuffledns", "katana", "waybackurls", "gf", "nuclei"]
     meta.tools = {t: tool_exists(t) for t in required_tools + optional_tools}
+    
+    log("INFO", f"Target: {target}")
+    log("INFO", f"Scan ID: {meta.scan_id}")
+    log("INFO", f"Output: {output_dir}")
+    if proxy:
+        log("INFO", f"Proxy: {proxy}")
 
     runner = CommandRunner(timeout_s=1200, quiet_stderr=True)
 
     artifacts: Dict[str, str] = {}
     findings: List[Finding] = []
-
-    log("INFO", f"Target: {target}")
-    log("INFO", f"Output: {output_dir}")
-    if proxy:
-        log("INFO", f"Proxy: {proxy}")
 
     # Phase 1+2: subdomain enumeration
     subdomains = run_subdomain_enumeration(
@@ -1039,6 +1256,13 @@ def main() -> int:
     artifacts["summary"] = summary_path
 
     log("SUCCESS", f"Done. Consolidated JSON: {consolidated_path}")
+    log("SUCCESS", f"Execution log: {os.path.join(output_dir, 'execution.log')}")
+    log("SUCCESS", f"Summary: {summary_path}")
+    log("INFO", "")
+    log("INFO", "Próximos pasos:")
+    log("INFO", f"  1. Revisar resultados en: {output_dir}")
+    log("INFO", f"  2. (Opcional) Persistir en SQL Server:")
+    log("INFO", f"     python3 persist_mssql.py {consolidated_path}")
     return 0
 
 
