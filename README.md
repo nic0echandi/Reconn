@@ -677,16 +677,6 @@ with open('superreconn.json') as f:
 
 Este proyecto está bajo licencia MIT. Ver [LICENSE](LICENSE) para detalles.
 
-## 🤝 Contribuciones
-
-¿Encontraste un bug? ¿Tienes una idea? Ver [CONTRIBUTING.md](CONTRIBUTING.md) para guía de contribución.
-
-## 📞 Soporte
-
-- 📖 [Documentación completa](https://github.com/nic0echandi/SuperReconn/wiki)
-- 🐛 [Reportar bugs](https://github.com/nic0echandi/SuperReconn/issues)
-- 💬 [Discussions](https://github.com/nic0echandi/SuperReconn/discussions)
-
 ---
 
 **Última actualización:** 2026-07-02  
