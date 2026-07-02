@@ -152,7 +152,7 @@ OUTPUT: JSON consolidado + Persistencia SQL (opcional)
 
 ```bash
 # Clonar repositorio
-git clone https://github.com/tuusuario/SuperReconn.git
+git clone https://github.com/nic0echandi/SuperReconn.git
 cd SuperReconn
 
 # Crear entorno virtual
@@ -683,9 +683,9 @@ Este proyecto está bajo licencia MIT. Ver [LICENSE](LICENSE) para detalles.
 
 ## 📞 Soporte
 
-- 📖 [Documentación completa](https://github.com/tuusuario/SuperReconn/wiki)
-- 🐛 [Reportar bugs](https://github.com/tuusuario/SuperReconn/issues)
-- 💬 [Discussions](https://github.com/tuusuario/SuperReconn/discussions)
+- 📖 [Documentación completa](https://github.com/nic0echandi/SuperReconn/wiki)
+- 🐛 [Reportar bugs](https://github.com/nic0echandi/SuperReconn/issues)
+- 💬 [Discussions](https://github.com/nic0echandi/SuperReconn/discussions)
 
 ---
 
