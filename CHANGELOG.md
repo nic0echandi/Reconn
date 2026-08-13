@@ -104,6 +104,24 @@ El formato es basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-13
+
+### Added
+- Health report post-scan (`discovery/health_report.txt` + `meta.health` en JSON)
+- Flag `--update-nuclei-templates` para actualizar templates antes del escaneo
+- Validación de templates nuclei por categoría antes de ejecutar
+
+### Fixed
+- Rutas de templates nuclei v3 (`http/cves/` en lugar de `cves/`)
+- Nuclei/takeover usan archivo `-l` en lugar de `-l -` con stdin
+- Detección WAF: flags httpx corregidos (`-cdn -cname` en lugar de `-cname-probe`)
+- WAF findings incluyen `cdn_name` / `cdn_type` cuando httpx los detecta
+
+### Changed
+- `setup.sh`: instala massdns, descarga resolvers si hay pocos, actualiza templates nuclei
+- `.gitignore`: excluye outputs de scan y entornos Python
+- README: eliminada sección duplicada
+
 ### Planeado para el Futuro
 
 #### Features Propuestas

@@ -1,0 +1,12 @@
+2026-08-13 16:22:22 [INFO] ======================================================================
+2026-08-13 16:22:22 [INFO] SuperReconn - Active/Passive Reconnaissance Pipeline
+2026-08-13 16:22:22 [INFO] ======================================================================
+2026-08-13 16:22:22 [INFO] Herramientas validadas: massdns, httpx, naabu, nmap
+2026-08-13 16:22:22 [INFO] Target: copetel.com.ar
+2026-08-13 16:22:22 [INFO] Scan ID: bbe14eac-b997-4732-b63b-d94d5e3b447c
+2026-08-13 16:22:22 [INFO] Output: ./copetel.com.ar-retest
+2026-08-13 16:22:22 [WARNING] Phase [resolvers] warning (5): only 5 resolvers configured; consider updating resolvers.txt
+2026-08-13 16:22:22 [DEBUG] Running: /home/user/.pdtm/go/bin/subfinder -d copetel.com.ar -silent
+2026-08-13 16:22:26 [DEBUG] Running: /snap/bin/amass enum -passive -d copetel.com.ar -silent
+2026-08-13 16:23:06 [DEBUG] Running: /usr/local/bin/assetfinder --subs-only copetel.com.ar
+2026-08-13 16:24:08 [DEBUG] Running: /usr/local/bin/shuffledns -d copetel.com.ar -w /home/user/Documents/MyGithub/Reconn/wordlists/subdomains.txt -r /home/user/Documents/MyGithub/Reconn/resolvers.txt -mode bruteforce -t 500 -o ./copetel.com.ar-retest/active/shuffledns_bruteforce.txt

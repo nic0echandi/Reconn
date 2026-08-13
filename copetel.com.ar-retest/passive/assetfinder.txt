@@ -1,0 +1,15 @@
+copetel.com.ar
+dns.copetel.com.ar
+dns2.copetel.com.ar
+ftp.copetel.com.ar
+mail.copetel.com.ar
+mail-42.copetel.com.ar
+mail-43.copetel.com.ar
+mail-45.copetel.com.ar
+smtpin00.copetel.com.ar
+smtpin01.copetel.com.ar
+smtpin02.copetel.com.ar
+smtpin03.copetel.com.ar
+smtpin04.copetel.com.ar
+webservice.copetel.com.ar
+www.copetel.com.ar

@@ -4,6 +4,20 @@ include
 lib
 pyvenv.cfg
 test.py
+.DS_Store
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# Scan outputs (contain target recon data)
+*-20*/
 /clinicacolon.com.ar-2026-06-28/
 /speedy.com.ar-2026-05-06/
-.DS_Store

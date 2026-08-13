@@ -255,6 +255,7 @@ class CommandRunner:
         """
         self.timeout_s = timeout_s
         self.quiet_stderr = quiet_stderr
+        self.last_error: Optional[str] = None
 
     def run(
         self,
@@ -287,6 +288,7 @@ class CommandRunner:
         if delay_s > 0:
             time.sleep(delay_s)
 
+        self.last_error = None
         env = os.environ.copy()
         if env_extra:
             env.update(env_extra)
@@ -313,6 +315,7 @@ class CommandRunner:
                     stdout_handle.close()
                 return True
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+                self.last_error = str(e)
                 if "FileNotFoundError" in type(e).__name__:
                     log("ERROR", f"Tool not found: {cmd[0]}")
                     return False
@@ -334,9 +337,10 @@ class ScanMeta:
     finished_at_utc: Optional[str] = None
     output_dir: str = ""
     script: str = "SuperReconn.py"
-    script_version: str = "1.0.0"
+    script_version: str = "1.1.0"
     args: Dict[str, Any] = field(default_factory=dict)
     tools: Dict[str, bool] = field(default_factory=dict)
+    health: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -387,6 +391,113 @@ class Finding:
     target: Optional[str] = None  # url or hostname or ip:port
     title: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PhaseResult:
+    """Resultado de una fase del pipeline."""
+    name: str
+    status: str  # ok | warning | failed | skipped
+    detail: str = ""
+    count: Optional[int] = None
+
+
+# Rutas de templates nuclei v3 (relativas al directorio nuclei-templates)
+NUCLEI_CATEGORIES: Dict[str, str] = {
+    "cves": "http/cves/",
+    "exposure": "http/exposures/",
+    "misconfig": "http/misconfiguration/",
+    "panels": "http/exposed-panels/",
+    "tokens": "http/token-spray/",
+    "vulns": "http/vulnerabilities/",
+    "dns": "dns/",
+    "javascript": "javascript/",
+    "network": "network/",
+}
+
+NUCLEI_TAKEOVER_TEMPLATES = "http/takeovers/"
+
+
+def record_phase(phases: List[PhaseResult], name: str, status: str, detail: str = "", count: Optional[int] = None) -> None:
+    """Registra el resultado de una fase y lo escribe al log."""
+    phases.append(PhaseResult(name=name, status=status, detail=detail, count=count))
+    level = {"ok": "INFO", "skipped": "INFO", "warning": "WARNING", "failed": "ERROR"}.get(status, "INFO")
+    suffix = f" ({count})" if count is not None else ""
+    log(level, f"Phase [{name}] {status}{suffix}: {detail}" if detail else f"Phase [{name}] {status}{suffix}")
+
+
+def overall_health_status(phases: List[PhaseResult]) -> str:
+    """Calcula estado general: healthy | degraded | failed."""
+    if any(p.status == "failed" for p in phases):
+        return "failed" if sum(1 for p in phases if p.status == "ok") == 0 else "degraded"
+    if any(p.status == "warning" for p in phases):
+        return "degraded"
+    return "healthy"
+
+
+def write_health_report(output_dir: str, phases: List[PhaseResult]) -> str:
+    """Escribe reporte de salud post-scan y retorna la ruta del archivo."""
+    path = os.path.join(output_dir, "discovery", "health_report.txt")
+    overall = overall_health_status(phases)
+    lines = [
+        "SuperReconn Health Report",
+        f"Overall status: {overall}",
+        "",
+        f"{'Phase':<28} {'Status':<10} {'Count':<8} Detail",
+        "-" * 80,
+    ]
+    for p in phases:
+        count_s = str(p.count) if p.count is not None else "-"
+        lines.append(f"{p.name:<28} {p.status:<10} {count_s:<8} {p.detail}")
+    lines.extend(["", f"Phases: {len(phases)} total, {sum(1 for p in phases if p.status == 'ok')} ok, "
+                       f"{sum(1 for p in phases if p.status == 'failed')} failed, "
+                       f"{sum(1 for p in phases if p.status == 'warning')} warnings, "
+                       f"{sum(1 for p in phases if p.status == 'skipped')} skipped"])
+    write_text_lines(path, lines)
+    return path
+
+
+def nuclei_templates_available(nuclei_bin: str, template_path: str) -> bool:
+    """Verifica que existan templates nuclei para una ruta dada."""
+    try:
+        p = subprocess.run(
+            [nuclei_bin, "-tl", "-t", template_path],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        return p.returncode == 0 and bool(p.stdout.strip())
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def ensure_nuclei_templates(runner: CommandRunner, *, update: bool = False) -> Tuple[bool, str]:
+    """
+    Valida templates nuclei; opcionalmente ejecuta nuclei -update-templates.
+
+    Returns:
+        (ok, mensaje)
+    """
+    nuclei_bin = resolve_executable("nuclei")
+    if not nuclei_bin:
+        return False, "nuclei not installed"
+
+    probe = NUCLEI_CATEGORIES["cves"]
+    if nuclei_templates_available(nuclei_bin, probe):
+        return True, f"templates available ({probe})"
+
+    if update:
+        log("INFO", "Updating nuclei templates (nuclei -update-templates)...")
+        if runner.run([nuclei_bin, "-update-templates"], allow_fail=True, quiet_stderr=False):
+            if nuclei_templates_available(nuclei_bin, probe):
+                return True, "templates updated successfully"
+            return False, "update completed but templates still missing; check nuclei install"
+
+    return False, (
+        "nuclei templates missing or outdated; run: nuclei -update-templates "
+        "or re-run with --update-nuclei-templates"
+    )
 
 
 def normalize_domain(s: str) -> str:
@@ -903,88 +1014,144 @@ def run_nuclei(
     rate_limit: int = 100,
     proxy: Optional[str] = None,
     waf_delay_s: float = 0.0,
-) -> Tuple[Dict[str, str], List[Finding]]:
-    categories = {
-        "cves": "cves/",
-        "exposure": "exposure/",
-        "misconfig": "security-misconfiguration/",
-        "panels": "exposed-panel/",
-        "tokens": "exposed-tokens/",
-        "vulns": "vulnerabilities/",
-        "dns": "dns/",
-        "javascript": "javascript/",
-        "network": "network/",
-    }
+) -> Tuple[Dict[str, str], List[Finding], List[str]]:
     out_paths: Dict[str, str] = {}
     all_findings: List[Finding] = []
+    failed_categories: List[str] = []
 
     nuclei_bin = resolve_executable("nuclei")
     if not nuclei_bin:
-        for k in categories:
+        for k in NUCLEI_CATEGORIES:
             out_paths[k] = os.path.join(out_dir, "scans", f"nuclei_{k}.jsonl")
             write_text_lines(out_paths[k], [])
-        return out_paths, []
+        return out_paths, [], ["nuclei not installed"]
 
     urls = read_text_lines(active_urls_path)
     if not urls:
-        for k in categories:
+        for k in NUCLEI_CATEGORIES:
             out_paths[k] = os.path.join(out_dir, "scans", f"nuclei_{k}.jsonl")
             write_text_lines(out_paths[k], [])
-        return out_paths, []
+        return out_paths, [], []
 
-    base = [nuclei_bin, "-jsonl", "-silent", "-c", "20", "-rate-limit", str(rate_limit), "-timeout", "30", "-l", "-"]
+    targets_file = os.path.join(out_dir, "scans", "nuclei_targets.txt")
+    write_text_lines(targets_file, urls)
+
+    base = [
+        nuclei_bin,
+        "-jsonl",
+        "-silent",
+        "-c",
+        "20",
+        "-rate-limit",
+        str(rate_limit),
+        "-timeout",
+        "30",
+        "-l",
+        targets_file,
+    ]
     if proxy:
         base.extend(["-proxy", proxy])
 
-    for key, tmpl in categories.items():
+    for key, tmpl in NUCLEI_CATEGORIES.items():
         out = os.path.join(out_dir, "scans", f"nuclei_{key}.jsonl")
         out_paths[key] = out
-        runner.run(base + ["-t", tmpl], stdout_path=out, stdin_text="\n".join(urls) + "\n", delay_s=waf_delay_s, retries=1, allow_fail=True)
+        if not nuclei_templates_available(nuclei_bin, tmpl):
+            log("WARNING", f"Nuclei templates not found for {key} ({tmpl}); skipping category")
+            write_text_lines(out, [])
+            failed_categories.append(key)
+            continue
+        ok = runner.run(base + ["-t", tmpl], stdout_path=out, delay_s=waf_delay_s, retries=1, allow_fail=True)
+        if not ok:
+            failed_categories.append(key)
+            log("WARNING", f"Nuclei scan failed for category {key}: {runner.last_error or 'unknown error'}")
         all_findings.extend(parse_nuclei_jsonl(out))
 
-    return out_paths, all_findings
+    return out_paths, all_findings, failed_categories
 
 
-def run_takeover_check(runner: CommandRunner, subdomains: List[str], out_dir: str, *, waf_delay_s: float = 0.0) -> Tuple[str, List[Finding]]:
+def run_takeover_check(runner: CommandRunner, subdomains: List[str], out_dir: str, *, waf_delay_s: float = 0.0) -> Tuple[str, List[Finding], bool]:
     out = os.path.join(out_dir, "vulns", "subdomain_takeover.jsonl")
     nuclei_bin = resolve_executable("nuclei")
     if not nuclei_bin or not subdomains:
         write_text_lines(out, [])
-        return out, []
-    runner.run(
-        [nuclei_bin, "-silent", "-jsonl", "-l", "-", "-t", "vulnerabilities/network/subdomain-takeover/"],
+        return out, [], False
+
+    if not nuclei_templates_available(nuclei_bin, NUCLEI_TAKEOVER_TEMPLATES):
+        log("WARNING", f"Takeover templates not found ({NUCLEI_TAKEOVER_TEMPLATES})")
+        write_text_lines(out, [])
+        return out, [], False
+
+    targets_file = os.path.join(out_dir, "vulns", "takeover_targets.txt")
+    write_text_lines(targets_file, subdomains)
+    ok = runner.run(
+        [nuclei_bin, "-silent", "-jsonl", "-l", targets_file, "-t", NUCLEI_TAKEOVER_TEMPLATES],
         stdout_path=out,
-        stdin_text="\n".join(subdomains) + "\n",
         delay_s=waf_delay_s,
         allow_fail=True,
     )
     findings = parse_nuclei_jsonl(out)
     for f in findings:
         f.category = "takeover"
-    return out, findings
+    return out, findings, ok
 
 
-def detect_waf_httpx(runner: CommandRunner, active_urls_path: str, out_dir: str, *, proxy: Optional[str] = None) -> Tuple[str, List[Finding]]:
+def detect_waf_httpx(runner: CommandRunner, active_urls_path: str, out_dir: str, *, proxy: Optional[str] = None) -> Tuple[str, List[Finding], bool]:
     out_jsonl = os.path.join(out_dir, "waf", "httpx_waf.jsonl")
     httpx_bin = resolve_executable("httpx")
     if not httpx_bin:
         write_text_lines(out_jsonl, [])
-        return out_jsonl, []
+        return out_jsonl, [], False
     urls = read_text_lines(active_urls_path)
     if not urls:
         write_text_lines(out_jsonl, [])
-        return out_jsonl, []
+        return out_jsonl, [], False
 
-    cmd = [httpx_bin, "-silent", "-json", "-tls-probe", "-cname-probe", "-H", f"User-Agent: {random.choice(USER_AGENTS)}"]
+    cmd = [
+        httpx_bin,
+        "-l",
+        active_urls_path,
+        "-silent",
+        "-json",
+        "-cdn",
+        "-cname",
+        "-H",
+        f"User-Agent: {random.choice(USER_AGENTS)}",
+    ]
     if proxy:
         cmd.extend(["-proxy", proxy])
-    runner.run(cmd, stdout_path=out_jsonl, stdin_text="\n".join(urls) + "\n", allow_fail=True)
+    ok = runner.run(cmd, stdout_path=out_jsonl, allow_fail=True)
 
     findings: List[Finding] = []
     for svc in parse_httpx_jsonl(out_jsonl):
-        if svc.cname:
-            findings.append(Finding(category="waf", source="httpx", target=svc.url, title="cname_probe", raw={"cname": svc.cname}))
-    return out_jsonl, findings
+        raw = svc.raw or {}
+        cdn_name = raw.get("cdn_name")
+        cdn_type = raw.get("cdn_type")
+        if cdn_name:
+            severity = "info"
+            if cdn_type == "waf":
+                severity = "low"
+            findings.append(
+                Finding(
+                    category="waf",
+                    source="httpx",
+                    severity=severity,
+                    target=svc.url,
+                    title=f"WAF/CDN detected: {cdn_name}",
+                    raw={"cdn_name": cdn_name, "cdn_type": cdn_type, "cname": svc.cname},
+                )
+            )
+        elif svc.cname:
+            findings.append(
+                Finding(
+                    category="waf",
+                    source="httpx",
+                    severity="info",
+                    target=svc.url,
+                    title="CNAME detected",
+                    raw={"cname": svc.cname},
+                )
+            )
+    return out_jsonl, findings, ok
 
 
 def build_structured_output(
@@ -1056,6 +1223,11 @@ Para persistencia en SQL Server:
     parser.add_argument("--no-gf", action="store_true", help="Disable gf filtering")
     parser.add_argument("--no-nuclei", action="store_true", help="Disable nuclei scans")
     parser.add_argument("--no-takeover", action="store_true", help="Disable subdomain takeover checks")
+    parser.add_argument(
+        "--update-nuclei-templates",
+        action="store_true",
+        help="Run nuclei -update-templates before vulnerability scanning if templates are missing",
+    )
     args = parser.parse_args()
 
     target = normalize_domain(args.target)
@@ -1106,6 +1278,7 @@ Para persistencia en SQL Server:
             "no_gf": args.no_gf,
             "no_nuclei": args.no_nuclei,
             "no_takeover": args.no_takeover,
+            "update_nuclei_templates": args.update_nuclei_templates,
         },
     )
 
@@ -1123,6 +1296,11 @@ Para persistencia en SQL Server:
 
     artifacts: Dict[str, str] = {}
     findings: List[Finding] = []
+    phases: List[PhaseResult] = []
+
+    resolver_count = len([ln for ln in read_text_lines(args.resolvers) if not ln.startswith("#")])
+    if resolver_count < 20:
+        record_phase(phases, "resolvers", "warning", f"only {resolver_count} resolvers configured; consider updating resolvers.txt", resolver_count)
 
     # Phase 1+2: subdomain enumeration
     subdomains = run_subdomain_enumeration(
@@ -1134,6 +1312,8 @@ Para persistencia en SQL Server:
         enable_passive=not args.no_passive,
         enable_active=not args.no_active,
     )
+    sub_status = "ok" if subdomains else "warning"
+    record_phase(phases, "subdomain_enumeration", sub_status, f"{len(subdomains)} subdomains", len(subdomains))
     subdomains_path = os.path.join(output_dir, "subdomains", "all_subdomains.txt")
     write_text_lines(subdomains_path, subdomains)
     artifacts["subdomains_all"] = subdomains_path
@@ -1141,6 +1321,8 @@ Para persistencia en SQL Server:
 
     # Phase 3: DNS resolution (pure Python parsing)
     resolved_domains, resolved_ips, dns_records = run_massdns_resolve(runner, args.resolvers, subdomains or [target])
+    dns_status = "ok" if resolved_domains else "warning"
+    record_phase(phases, "dns_resolution", dns_status, f"{len(resolved_domains)} domains, {len(resolved_ips)} IPs", len(resolved_domains))
     resolved_domains_path = os.path.join(output_dir, "discovery", "resolved_domains.txt")
     resolved_ips_path = os.path.join(output_dir, "discovery", "resolved_ips.txt")
     write_text_lines(resolved_domains_path, resolved_domains)
@@ -1154,11 +1336,13 @@ Para persistencia en SQL Server:
 
     # Phase 4: HTTP discovery
     active_urls_path, http_services = run_http_discovery(runner, resolved_domains, output_dir, rate_limit=args.rate_limit, proxy=proxy)
+    record_phase(phases, "http_discovery", "ok" if http_services else "warning", f"{len(http_services)} services", len(http_services))
     artifacts["active_urls"] = active_urls_path
     write_json(os.path.join(output_dir, "structured", "http_services.json"), {"services": [asdict(s) for s in http_services]})
 
     # Phase 5: port scanning
     open_ports_path, naabu_ports = run_port_scan(runner, resolved_ips, output_dir, rate_limit=args.rate_limit, proxy=proxy)
+    record_phase(phases, "port_scan", "ok" if naabu_ports else "warning", f"{len(naabu_ports)} open ports", len(naabu_ports))
     artifacts["open_ports"] = open_ports_path
     write_json(
         os.path.join(output_dir, "structured", "open_ports.json"),
@@ -1167,15 +1351,28 @@ Para persistencia en SQL Server:
 
     # Phase 6: service/version detection via nmap xml
     (nmap_txt, nmap_xml), network_services = run_nmap_service_detection(runner, resolved_ips, naabu_ports, output_dir)
+    record_phase(phases, "nmap_services", "ok" if network_services else "warning", f"{len(network_services)} services", len(network_services))
     artifacts["nmap_versions_txt"] = nmap_txt
     artifacts["nmap_versions_xml"] = nmap_xml
     write_json(os.path.join(output_dir, "structured", "network_services.json"), {"services": [asdict(s) for s in network_services]})
 
     # Phase 7: WAF probing
     if not args.no_waf:
-        waf_jsonl, waf_findings = detect_waf_httpx(runner, active_urls_path, output_dir, proxy=proxy)
+        waf_jsonl, waf_findings, waf_ok = detect_waf_httpx(runner, active_urls_path, output_dir, proxy=proxy)
         artifacts["waf_httpx_jsonl"] = waf_jsonl
         findings.extend(waf_findings)
+        waf_status = "ok" if waf_ok else "failed"
+        if waf_ok and not waf_findings:
+            waf_status = "ok"
+        record_phase(
+            phases,
+            "waf_detection",
+            waf_status,
+            f"{len(waf_findings)} WAF/CDN indicators" if waf_ok else (runner.last_error or "httpx WAF probe failed"),
+            len(waf_findings),
+        )
+    else:
+        record_phase(phases, "waf_detection", "skipped", "disabled via --no-waf")
 
     # Phase 8: crawling
     if not args.no_crawl:
@@ -1186,39 +1383,74 @@ Para persistencia en SQL Server:
         endpoints_path = merge_endpoints(output_dir, katana_path, wayback_path)
         artifacts["endpoints"] = endpoints_path
         write_json(os.path.join(output_dir, "structured", "endpoints.json"), {"endpoints": read_text_lines(endpoints_path)})
+        endpoint_count = len(read_text_lines(endpoints_path))
+        record_phase(phases, "crawling", "ok" if endpoint_count else "warning", f"{endpoint_count} endpoints", endpoint_count)
     else:
         endpoints_path = os.path.join(output_dir, "discovery", "discovered_endpoints.txt")
         write_text_lines(endpoints_path, [])
         artifacts["endpoints"] = endpoints_path
+        record_phase(phases, "crawling", "skipped", "disabled via --no-crawl")
 
     # Phase 9: gf filters
     if not args.no_gf:
         gf_out = run_gf_filters(runner, endpoints_path, output_dir, ["xss", "rce", "ssti", "sqli", "ssrf", "lfi", "redirect", "crlf"], waf_delay_s=args.waf_delay)
         artifacts.update({f"gf_{k}": v for k, v in gf_out.items()})
+        gf_count = 0
         for pat, pth in gf_out.items():
             for url in read_text_lines(pth):
+                gf_count += 1
                 findings.append(Finding(category="gf", source=pat, severity="info", target=url, title=f"gf_{pat}", raw={}))
+        record_phase(phases, "gf_patterns", "ok", f"{gf_count} pattern matches", gf_count)
+    else:
+        record_phase(phases, "gf_patterns", "skipped", "disabled via --no-gf")
 
     # Phase 10: nuclei
     if not args.no_nuclei:
-        nuclei_paths, nuclei_findings = run_nuclei(
-            runner,
-            active_urls_path,
-            output_dir,
-            rate_limit=args.rate_limit,
-            proxy=proxy,
-            waf_delay_s=args.waf_delay,
-        )
-        artifacts.update({f"nuclei_{k}": v for k, v in nuclei_paths.items()})
-        findings.extend(nuclei_findings)
+        templates_ok, templates_msg = ensure_nuclei_templates(runner, update=args.update_nuclei_templates)
+        record_phase(phases, "nuclei_templates", "ok" if templates_ok else "failed", templates_msg)
+        if templates_ok:
+            nuclei_paths, nuclei_findings, nuclei_failed = run_nuclei(
+                runner,
+                active_urls_path,
+                output_dir,
+                rate_limit=args.rate_limit,
+                proxy=proxy,
+                waf_delay_s=args.waf_delay,
+            )
+            artifacts.update({f"nuclei_{k}": v for k, v in nuclei_paths.items()})
+            findings.extend(nuclei_findings)
+            nuclei_status = "ok" if not nuclei_failed else ("warning" if nuclei_findings else "failed")
+            detail = f"{len(nuclei_findings)} findings"
+            if nuclei_failed:
+                detail += f"; failed categories: {', '.join(nuclei_failed)}"
+            record_phase(phases, "nuclei_scan", nuclei_status, detail, len(nuclei_findings))
+        else:
+            record_phase(phases, "nuclei_scan", "skipped", templates_msg)
+    else:
+        record_phase(phases, "nuclei_scan", "skipped", "disabled via --no-nuclei")
 
     # Phase 11: takeover
     if not args.no_takeover:
-        takeover_path, takeover_findings = run_takeover_check(runner, subdomains, output_dir, waf_delay_s=args.waf_delay)
+        takeover_path, takeover_findings, takeover_ok = run_takeover_check(runner, subdomains, output_dir, waf_delay_s=args.waf_delay)
         artifacts["takeover"] = takeover_path
         findings.extend(takeover_findings)
+        record_phase(
+            phases,
+            "subdomain_takeover",
+            "ok" if takeover_ok else "failed",
+            f"{len(takeover_findings)} takeover candidates" if takeover_ok else (runner.last_error or "takeover check failed"),
+            len(takeover_findings),
+        )
+    else:
+        record_phase(phases, "subdomain_takeover", "skipped", "disabled via --no-takeover")
 
     meta.finished_at_utc = now_utc_iso()
+    health_path = write_health_report(output_dir, phases)
+    artifacts["health_report"] = health_path
+    meta.health = {
+        "overall": overall_health_status(phases),
+        "phases": [asdict(p) for p in phases],
+    }
 
     structured = build_structured_output(
         meta,
@@ -1251,13 +1483,18 @@ Para persistencia en SQL Server:
         f"Open ports: {len(naabu_ports)}",
         f"Network services (nmap xml parsed): {len(network_services)}",
         f"Findings: {len(findings)}",
+        f"Health: {meta.health.get('overall', 'unknown')}",
     ]
     write_text_lines(summary_path, summary_lines)
     artifacts["summary"] = summary_path
 
+    overall = meta.health.get("overall", "healthy")
     log("SUCCESS", f"Done. Consolidated JSON: {consolidated_path}")
+    log("SUCCESS", f"Health report: {health_path} ({overall})")
     log("SUCCESS", f"Execution log: {os.path.join(output_dir, 'execution.log')}")
     log("SUCCESS", f"Summary: {summary_path}")
+    if overall != "healthy":
+        log("WARNING", f"Scan completed with status '{overall}'; review {health_path}")
     log("INFO", "")
     log("INFO", "Próximos pasos:")
     log("INFO", f"  1. Revisar resultados en: {output_dir}")

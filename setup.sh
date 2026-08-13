@@ -211,7 +211,53 @@ PACKAGES=(
 
 log_info "Instalando paquetes: ${PACKAGES[*]}"
 sudo apt-get install -y "${PACKAGES[@]}" > /dev/null
-log_success "Dependencias del sistema instaladas"
+    log_success "Dependencias del sistema instaladas"
+
+# ============================================================================
+# Instalación de massdns (requerido, no disponible via go install)
+# ============================================================================
+
+if [ "$SKIP_GO" = false ]; then
+    print_header "INSTALACIÓN DE MASSDNS"
+
+    if command -v massdns &> /dev/null; then
+        log_success "massdns ya está instalado: $(massdns 2>&1 | head -1 || echo 'ok')"
+    else
+        log_info "Compilando massdns desde fuente..."
+        MASSDNS_DIR="/tmp/massdns-build-$$"
+        rm -rf "$MASSDNS_DIR"
+        git clone --depth 1 https://github.com/blechschmidt/massdns.git "$MASSDNS_DIR"
+        make -C "$MASSDNS_DIR" > /dev/null
+        sudo cp "$MASSDNS_DIR/bin/massdns" /usr/local/bin/massdns
+        sudo chmod +x /usr/local/bin/massdns
+        rm -rf "$MASSDNS_DIR"
+        log_success "massdns instalado en /usr/local/bin/massdns"
+    fi
+fi
+
+# ============================================================================
+# Resolvers DNS
+# ============================================================================
+
+print_header "CONFIGURACIÓN DE RESOLVERS DNS"
+
+RESOLVERS_FILE="$SCRIPT_DIR/resolvers.txt"
+RESOLVER_COUNT=0
+if [ -f "$RESOLVERS_FILE" ]; then
+    RESOLVER_COUNT=$(grep -v '^#' "$RESOLVERS_FILE" | grep -c . || true)
+fi
+
+if [ ! -s "$RESOLVERS_FILE" ] || [ "$RESOLVER_COUNT" -lt 20 ]; then
+    log_info "Descargando resolvers DNS públicos (${RESOLVER_COUNT} actuales)..."
+    if curl -fsSL "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt" -o "$RESOLVERS_FILE"; then
+        RESOLVER_COUNT=$(grep -v '^#' "$RESOLVERS_FILE" | grep -c . || true)
+        log_success "Resolvers descargados: ${RESOLVER_COUNT} entradas"
+    else
+        log_warning "No se pudieron descargar resolvers; conservando $RESOLVERS_FILE"
+    fi
+else
+    log_success "Resolvers OK: ${RESOLVER_COUNT} entradas en resolvers.txt"
+fi
 
 # ============================================================================
 # Instalación de Go (si no está saltado)
@@ -291,6 +337,16 @@ EOL
     done
     
     log_success "Herramientas de reconocimiento instaladas"
+
+    # Actualizar templates nuclei (requerido para fases de vulnerabilidades)
+    if command -v nuclei &> /dev/null; then
+        log_info "Actualizando templates nuclei..."
+        if nuclei -update-templates > /dev/null 2>&1; then
+            log_success "Templates nuclei actualizados"
+        else
+            log_warning "No se pudieron actualizar templates nuclei; ejecuta manualmente: nuclei -update-templates"
+        fi
+    fi
 fi
 
 # ============================================================================
