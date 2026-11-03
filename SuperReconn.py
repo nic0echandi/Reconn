@@ -20,6 +20,7 @@ Variables de entorno:
     RECON_TOOL_PATH: Rutas adicionales donde buscar herramientas (separadas por :)
     RECON_RATE_LIMIT: Límite de tasa (default: 100)
     RECON_WAF_DELAY: Delay entre peticiones para eludir WAF (default: 1)
+    RECON_NUCLEI_TIMEOUT: Timeout por categoría de Nuclei en segundos (default: 1800)
     RECON_PROXY: Proxy HTTP/HTTPS (ej: http://127.0.0.1:8080)
 
 Nota: La persistencia en SQL Server es OPCIONAL. Usa persist_mssql.py después de ejecutar.
@@ -268,6 +269,7 @@ class CommandRunner:
         retry_backoff_s: float = 1.5,
         delay_s: float = 0.0,
         allow_fail: bool = False,
+        timeout_s: Optional[int] = None,
     ) -> bool:
         """
         Ejecuta comando con reintentos y timeout.
@@ -294,9 +296,9 @@ class CommandRunner:
             env.update(env_extra)
 
         for attempt in range(retries):
+            stdout_handle = None
             try:
                 log("DEBUG", f"Running: {' '.join(cmd)}")
-                stdout_handle = None
                 stderr_handle = subprocess.DEVNULL if self.quiet_stderr else None
                 if stdout_path:
                     safe_mkdir(os.path.dirname(stdout_path))
@@ -308,11 +310,9 @@ class CommandRunner:
                     env=env,
                     stdout=stdout_handle if stdout_handle else subprocess.DEVNULL,
                     stderr=stderr_handle,
-                    timeout=self.timeout_s,
+                    timeout=self.timeout_s if timeout_s is None else timeout_s,
                     check=True,
                 )
-                if stdout_handle:
-                    stdout_handle.close()
                 return True
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
                 self.last_error = str(e)
@@ -322,6 +322,9 @@ class CommandRunner:
                 log("WARNING", f"Command failed (attempt {attempt + 1}/{retries}): {e}")
                 if attempt < retries - 1:
                     time.sleep(retry_backoff_s ** attempt)
+            finally:
+                if stdout_handle:
+                    stdout_handle.close()
 
         if allow_fail:
             return False
@@ -1014,6 +1017,7 @@ def run_nuclei(
     rate_limit: int = 100,
     proxy: Optional[str] = None,
     waf_delay_s: float = 0.0,
+    timeout_s: int = 1800,
 ) -> Tuple[Dict[str, str], List[Finding], List[str]]:
     out_paths: Dict[str, str] = {}
     all_findings: List[Finding] = []
@@ -1060,7 +1064,14 @@ def run_nuclei(
             write_text_lines(out, [])
             failed_categories.append(key)
             continue
-        ok = runner.run(base + ["-t", tmpl], stdout_path=out, delay_s=waf_delay_s, retries=1, allow_fail=True)
+        ok = runner.run(
+            base + ["-t", tmpl],
+            stdout_path=out,
+            delay_s=waf_delay_s,
+            retries=1,
+            allow_fail=True,
+            timeout_s=timeout_s,
+        )
         if not ok:
             failed_categories.append(key)
             log("WARNING", f"Nuclei scan failed for category {key}: {runner.last_error or 'unknown error'}")
@@ -1202,6 +1213,7 @@ Variables de entorno:
   RECON_TOOL_PATH      Rutas adicionales para buscar herramientas (separadas por :)
   RECON_RATE_LIMIT     Límite de tasa por defecto (default: 100)
   RECON_WAF_DELAY      Delay entre peticiones (default: 1s)
+  RECON_NUCLEI_TIMEOUT Timeout por categoría de Nuclei en segundos (default: 1800)
   RECON_PROXY          Proxy HTTP/HTTPS (ej: http://127.0.0.1:8080)
 
 Para persistencia en SQL Server:
@@ -1214,6 +1226,12 @@ Para persistencia en SQL Server:
     parser.add_argument("--resolvers", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "resolvers.txt"))
     parser.add_argument("--rate-limit", type=int, default=int(os.getenv("RECON_RATE_LIMIT", "100")))
     parser.add_argument("--waf-delay", type=float, default=float(os.getenv("RECON_WAF_DELAY", "1")))
+    parser.add_argument(
+        "--nuclei-timeout",
+        type=int,
+        default=int(os.getenv("RECON_NUCLEI_TIMEOUT", "1800")),
+        help="Maximum runtime per Nuclei category in seconds (default: 1800)",
+    )
     parser.add_argument("--proxy", default=os.getenv("RECON_PROXY", ""))
 
     parser.add_argument("--no-passive", action="store_true", help="Disable passive subdomain enumeration")
@@ -1229,6 +1247,9 @@ Para persistencia en SQL Server:
         help="Run nuclei -update-templates before vulnerability scanning if templates are missing",
     )
     args = parser.parse_args()
+
+    if args.nuclei_timeout <= 0:
+        parser.error("--nuclei-timeout must be a positive number of seconds")
 
     target = normalize_domain(args.target)
     if not target or "." not in target:
@@ -1270,6 +1291,7 @@ Para persistencia en SQL Server:
         args={
             "rate_limit": args.rate_limit,
             "waf_delay": args.waf_delay,
+            "nuclei_timeout": args.nuclei_timeout,
             "proxy": proxy,
             "no_passive": args.no_passive,
             "no_active": args.no_active,
@@ -1416,6 +1438,7 @@ Para persistencia en SQL Server:
                 rate_limit=args.rate_limit,
                 proxy=proxy,
                 waf_delay_s=args.waf_delay,
+                timeout_s=args.nuclei_timeout,
             )
             artifacts.update({f"nuclei_{k}": v for k, v in nuclei_paths.items()})
             findings.extend(nuclei_findings)

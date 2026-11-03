@@ -238,6 +238,7 @@ RECON_RESOLVERS=./resolvers.txt # Resolvers DNS
 # Performance
 RECON_RATE_LIMIT=100            # Límite de tasa (requests/sec)
 RECON_WAF_DELAY=1               # Delay entre peticiones (segundos)
+RECON_NUCLEI_TIMEOUT=1800       # Timeout por categoría de Nuclei (30 min)
 RECON_PROXY=http://proxy:8080   # Proxy opcional
 
 # SQL Server (ver sección Persistencia)
@@ -271,6 +272,12 @@ python3 SuperReconn.py example.com --proxy http://127.0.0.1:8080
 
 # Con rate limiting alto (conexión rápida)
 python3 SuperReconn.py example.com --rate-limit 500 --waf-delay 0.5
+
+# Timeout de 30 minutos por categoría de Nuclei (valor predeterminado)
+python3 SuperReconn.py example.com --nuclei-timeout 1800
+
+# Cambiarlo a 1 hora por categoría, si es necesario
+python3 SuperReconn.py example.com --nuclei-timeout 3600
 ```
 
 ### Opciones Avanzadas
@@ -547,10 +554,17 @@ wget https://raw.githubusercontent.com/tomnomnom/massdns/master/lists/resolvers.
 WARNING: Command failed (attempt 1/1): timeout
 ```
 
+El timeout de Nuclei es independiente del de las demás herramientas y se aplica
+a cada categoría. Su valor predeterminado es 1800 segundos (30 minutos). Si se
+alcanza, la categoría se interrumpe y sus resultados pueden estar incompletos.
+
 **Solución:**
 ```bash
-# Usar flag para aumentar timeout
-python3 SuperReconn.py example.com --rate-limit 50  # Más lento
+# Aumentar el límite de Nuclei a 1 hora por categoría
+python3 SuperReconn.py example.com --nuclei-timeout 3600
+
+# O configurarlo en el entorno
+RECON_NUCLEI_TIMEOUT=3600 python3 SuperReconn.py example.com
 
 # O reducir objetivos
 python3 SuperReconn.py example.com --no-nuclei --no-crawl
