@@ -5,6 +5,7 @@ lib
 pyvenv.cfg
 test.py
 .DS_Store
+reporte.html
 
 # Python
 venv/
@@ -21,3 +22,5 @@ htmlcov/
 *-20*/
 /clinicacolon.com.ar-2026-06-28/
 /speedy.com.ar-2026-05-06/
+reportes/
+tests/
