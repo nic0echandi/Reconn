@@ -270,6 +270,7 @@ class CommandRunner:
         delay_s: float = 0.0,
         allow_fail: bool = False,
         timeout_s: Optional[int] = None,
+        capture_stderr: bool = False,
     ) -> bool:
         """
         Ejecuta comando con reintentos y timeout.
@@ -283,6 +284,7 @@ class CommandRunner:
             retry_backoff_s: Factor de backoff exponencial entre reintentos
             delay_s: Delay antes de ejecutar
             allow_fail: Si True, no falla si el comando retorna error
+            capture_stderr: Si True, incluye stderr en el error del comando
             
         Returns:
             True si el comando fue exitoso, False en caso contrario
@@ -299,7 +301,11 @@ class CommandRunner:
             stdout_handle = None
             try:
                 log("DEBUG", f"Running: {' '.join(cmd)}")
-                stderr_handle = subprocess.DEVNULL if self.quiet_stderr else None
+                stderr_handle = (
+                    subprocess.PIPE
+                    if capture_stderr
+                    else (subprocess.DEVNULL if self.quiet_stderr else None)
+                )
                 if stdout_path:
                     safe_mkdir(os.path.dirname(stdout_path))
                     stdout_handle = open(stdout_path, "w", encoding="utf-8", newline="\n")
@@ -316,6 +322,14 @@ class CommandRunner:
                 return True
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
                 self.last_error = str(e)
+                stderr_output = getattr(e, "stderr", None)
+                if isinstance(stderr_output, bytes):
+                    stderr_output = stderr_output.decode("utf-8", errors="replace")
+                if capture_stderr and isinstance(stderr_output, str) and stderr_output.strip():
+                    stderr_detail = stderr_output.strip()
+                    if len(stderr_detail) > 2000:
+                        stderr_detail = f"...{stderr_detail[-2000:]}"
+                    self.last_error += f"; stderr: {stderr_detail}"
                 if "FileNotFoundError" in type(e).__name__:
                     log("ERROR", f"Tool not found: {cmd[0]}")
                     return False
@@ -492,7 +506,7 @@ def ensure_nuclei_templates(runner: CommandRunner, *, update: bool = False) -> T
 
     if update:
         log("INFO", "Updating nuclei templates (nuclei -update-templates)...")
-        if runner.run([nuclei_bin, "-update-templates"], allow_fail=True, quiet_stderr=False):
+        if runner.run([nuclei_bin, "-update-templates"], allow_fail=True, capture_stderr=True):
             if nuclei_templates_available(nuclei_bin, probe):
                 return True, "templates updated successfully"
             return False, "update completed but templates still missing; check nuclei install"
@@ -1071,6 +1085,7 @@ def run_nuclei(
             retries=1,
             allow_fail=True,
             timeout_s=timeout_s,
+            capture_stderr=True,
         )
         if not ok:
             failed_categories.append(key)

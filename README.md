@@ -557,6 +557,10 @@ WARNING: Command failed (attempt 1/1): timeout
 El timeout de Nuclei es independiente del de las demás herramientas y se aplica
 a cada categoría. Su valor predeterminado es 1800 segundos (30 minutos). Si se
 alcanza, la categoría se interrumpe y sus resultados pueden estar incompletos.
+La fase analiza las URLs HTTP activas detectadas; un resultado sin hallazgos no
+confirma que el objetivo esté libre de vulnerabilidades. Si `cves` aparece entre
+las categorías fallidas, no interpretes un archivo vacío o parcial como un
+escaneo CVE completo. Los errores de Nuclei se incluyen en `execution.log`.
 
 **Solución:**
 ```bash
